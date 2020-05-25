@@ -1,0 +1,127 @@
+image: haritz4998/gitlab-kubectl-gcloud-docker-plugin:v0.1
+
+services:
+  - docker:18.09.7-dind
+
+variables:
+  DOCKER_DRIVER: overlay2
+  DOCKER_HOST: tcp://docker:2375
+
+stages:
+  - validate
+  - build
+  - deploy
+
+cache:
+  key: ${CI_COMMIT_REF_SLUG}
+  paths:
+    - vendor/
+
+before_script:
+  - docker info
+  - echo "$SERVICE_ACCOUNT_KEY" > key.json
+  - docker login -u _json_key --password-stdin https://us.gcr.io < key.json
+
+
+validate:
+  stage: validate
+  script:
+    - cp .env.example .env
+    - composer install
+    - php artisan key:generate
+    # - vendor/bin/phpunit disabled because TestCase are error
+  cache:
+    paths:
+      - vendor/
+  except:
+    - master
+
+build-develop:
+  stage: build
+  variables:
+    DOCKER_IMAGE_TAG: "$DOCKER_IMAGE_TAG"
+  script:
+    - docker pull ${DOCKER_IMAGE_TAG}:latest || true
+    - docker build --cache-from "${DOCKER_IMAGE_TAG}" -t "${DOCKER_IMAGE_TAG}:latest" -t "${DOCKER_IMAGE_TAG}:$CI_COMMIT_SHA" .
+    - docker push ${DOCKER_IMAGE_TAG}
+  except:
+    - master
+  cache:
+    paths:
+      - vendor/
+
+build-production:
+  stage: build
+  variables:
+    DOCKER_IMAGE_TAG: "$DOCKER_IMAGE_TAG"
+  script:
+    - docker pull ${DOCKER_IMAGE_TAG}:latest || true
+    - docker build --cache-from "${DOCKER_IMAGE_TAG}" -t "${DOCKER_IMAGE_TAG}:latest" -t "${DOCKER_IMAGE_TAG}:$CI_COMMIT_SHA" .
+    - docker push ${DOCKER_IMAGE_TAG}
+  only:
+    - master
+  cache:
+    paths:
+      - vendor/
+
+deploy-gke-dev:
+  stage: deploy
+  variables:
+    DOCKER_IMAGE_TAG: "$DOCKER_IMAGE_TAG"
+    DEPLOYMENT_NAME: "$DEPLOYMENT_NAME"
+  script:
+    - echo "$SERVICE_ACCOUNT_KEY" > key.json
+    - gcloud auth activate-service-account --key-file=key.json
+    - gcloud config set project ${GCP_PROJECT}
+    - gcloud config set container/cluster ${GCP_K8S_CLUSTER}-dev
+    - gcloud config set compute/region ${GCP_K8S_REGION}
+    - gcloud container clusters get-credentials ${GCP_K8S_CLUSTER}-dev --zone ${GCP_K8S_REGION}
+    - kubectl set env deployment/${DEPLOYMENT_NAME} CI_COMMIT_SHA=$CI_COMMIT_SHA -n development
+    - kubectl set image deployment/${DEPLOYMENT_NAME} app=${DOCKER_IMAGE_TAG} -n development
+  when: manual
+  except:
+    - master
+
+deploy_gae_development:
+  image: google/cloud-sdk:alpine
+  stage: deploy
+  environment: Production
+  only:
+    - dev
+  when: manual
+  script:
+    - echo $SERVICE_ACCOUNT_STAGING > /tmp/$CI_PIPELINE_ID.json
+    - gcloud auth activate-service-account --key-file /tmp/$CI_PIPELINE_ID.json
+    - gcloud --quiet --project $PROJECT_ID_STAGING app deploy app-dev.yaml
+
+
+deploy-gke-production:
+  stage: deploy
+  variables:
+    DOCKER_IMAGE_TAG: "$DOCKER_IMAGE_TAG"
+    DEPLOYMENT_NAME: "$DEPLOYMENT_NAME"
+  script:
+    - echo "$SERVICE_ACCOUNT_KEY" > key.json
+    - gcloud auth activate-service-account --key-file=key.json
+    - gcloud config set project ${GCP_PROJECT}
+    - gcloud config set container/cluster ${GCP_K8S_CLUSTER}
+    - gcloud config set compute/region ${GCP_K8S_REGION}
+    - gcloud container clusters get-credentials ${GCP_K8S_CLUSTER} --zone ${GCP_K8S_REGION}
+    - kubectl set env deployment/${DEPLOYMENT_NAME} CI_COMMIT_SHA=$CI_COMMIT_SHA -n production
+    - kubectl set image deployment/${DEPLOYMENT_NAME} app=${DOCKER_IMAGE_TAG} -n production
+  when: manual
+  only:
+    - master
+
+deploy_gae_production:
+  image: google/cloud-sdk:alpine
+  stage: deploy
+  environment: Production
+  only:
+    - master
+  when: manual
+  script:
+    - echo $SERVICE_ACCOUNT > /tmp/$CI_PIPELINE_ID.json
+    - gcloud auth activate-service-account --key-file /tmp/$CI_PIPELINE_ID.json
+    - gcloud --quiet --project $PROJECT_ID app deploy app.yaml
+    
